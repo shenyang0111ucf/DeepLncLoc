@@ -1,6 +1,7 @@
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import OneHotEncoder
 from gensim.models import Word2Vec
+from gensim.models.doc2vec import Doc2Vec, TaggedDocument
 import numpy as np
 from tqdm import tqdm
 import os,logging,pickle,random,torch
@@ -28,6 +29,7 @@ class DataClass:
                 self.id2lab.append(lab)
                 cnt += 1
         self.classNum = cnt
+        print(self.id2lab)
         # Get the mapping variables for kmers and kmers_id
         print('Getting the mapping variables for kmers and kmers id......')
         self.kmers2id,self.id2kmers = {"<EOS>":0},["<EOS>"]
@@ -95,6 +97,15 @@ class DataClass:
             for i in range(self.kmersNum):
                 char2vec[i] = model.wv[self.id2kmers[i]]
             self.vector['embedding'] = char2vec
+        elif method == 'doc2vec':
+            doc = [i + ['<EOS>'] for i in self.RNADoc]
+            documents = [TaggedDocument(x,[i]) for i, x in enumerate(doc)]
+            model = Doc2Vec(documents, vector_size=feaSize, window=window, min_count=0, workers=workers, dm_concat=1, epochs=15)
+
+            para2vec=np.zeros((len(doc), feaSize),dtype=np.float32)
+            for i in range(len(self.RNADoc)):
+                para2vec[i] = model.docvecs[i]
+            self.vector['embedding'] = para2vec
         elif method == 'glovechar':
             from glove import Glove,Corpus
             doc = [i+['<EOS>'] for i in self.RNADoc]
@@ -143,7 +154,19 @@ class DataClass:
                         "seqArr":torch.tensor([i+[0]*(RNASeqMaxLen-len(i)) for i in X[samples]], dtype=torch.long).to(device), \
                         "seqLenArr":torch.tensor(XLen[samples], dtype=torch.int).to(device)
                       }, torch.tensor(self.Lab[samples], dtype=torch.long).to(device)
-    
+    def random_para_data_stream(self, batchSize=128, type='train',device=torch.device('cpu')):
+        idList = self.trainIdList if type == 'train' else self.validIdList
+        X, XLen = self.tokenizedRNASent, self.RNASeqLen
+        while True:
+            random.shuffle(idList)
+            for i in range((len(idList)+batchSize-1)//batchSize):
+                samples = idList[i * batchSize:(i + 1) * batchSize]
+                yield {
+                      "seqArr": torch.tensor([[i] for i in samples],
+                                             dtype=torch.long).to(device),
+                      "seqLenArr": torch.tensor(XLen[samples], dtype=torch.int).to(device)
+                      }, torch.tensor(self.Lab[samples], dtype=torch.long).to(device)
+
     def one_epoch_batch_data_stream(self, batchSize=128, type='valid', device=torch.device('cpu')):
         if type == 'train':
             idList = self.trainIdList

@@ -7,9 +7,20 @@ class TextSPP(nn.Module):
     def __init__(self, size=128, name='textSpp'):
         super(TextSPP, self).__init__()
         self.name = name
-        self.spp = nn.AdaptiveAvgPool1d(size)
+        self.size = size
+        #self.spp = nn.AdaptiveAvgPool1d(size)
     def forward(self, x):
-        return self.spp(x)
+        input_size = x.shape[-1]
+        stride = (input_size//self.size)
+        if stride < 1:
+            stride = 1
+        kernel_size = input_size - (self.size-1) * stride
+        if kernel_size < 1:
+            kernel_size = 1
+        if input_size < 5:
+            padfunc = nn.ConstantPad1d((0, 5-input_size), 0)
+            x = padfunc(x)
+        return F.avg_pool1d(x, kernel_size, stride, padding=0)
 
 class TextSPP2(nn.Module):
     def __init__(self, size=128, name='textSpp2'):

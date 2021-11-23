@@ -1,6 +1,7 @@
 import numpy as np
 import torch,time,os,pickle
 from torch import nn as nn
+import torch.utils
 from .nnLayer import *
 from .metrics import *
 from collections import Counter,Iterable
@@ -11,9 +12,9 @@ class BaseClassifier:
         pass
     def calculate_y_logit(self, X, XLen):
         pass
-    def cv_train(self, dataClass, trainSize=256, batchSize=256, epoch=100, stopRounds=10, earlyStop=10, saveRounds=1, 
-                 optimType='Adam', lr=0.001, weightDecay=0, kFold=5, isHigherBetter=True, metrics="MaF", report=["ACC", "MaF"], 
-                 savePath='model'):
+    def cv_train(self, dataClass, trainSize=256, batchSize=256, epoch=100, stopRounds=10, earlyStop=10, saveRounds=1,
+                 optimType='Adam', lr=0.001, weightDecay=0, kFold=5, isHigherBetter=True, metrics="MaF", report=["ACC", "MaF"],
+                 savePath='model', vectorFunc='word2vec'):
         skf = StratifiedKFold(n_splits=kFold)
         validRes,testRes = [],[]
         tvIdList = dataClass.trainIdList+dataClass.validIdList
@@ -22,37 +23,52 @@ class BaseClassifier:
             self.reset_parameters()
             dataClass.trainIdList,dataClass.validIdList = [tvIdList[i] for i in trainIndices],[tvIdList[i] for i in validIndices]
             res = self.train(dataClass,trainSize,batchSize,epoch,stopRounds,earlyStop,saveRounds,optimType,lr,weightDecay,
-                             isHigherBetter,metrics,report,f"{savePath}_cv{i+1}")
+                             isHigherBetter,metrics,report,f"{savePath}_cv{i+1}", vectorFunc)
             validRes.append(res)
             if dataClass.testSampleNum>0:
                 testRes.append(self.calculate_indicator_by_iterator(dataClass.one_epoch_batch_data_stream(type='test',batchSize=trainSize), dataClass.classNum, report))
         Metrictor.table_show(validRes, report)
         if dataClass.testSampleNum>0:
             Metrictor.table_show(testRes, report)
-    def train(self, dataClass, trainSize=256, batchSize=256, epoch=100, stopRounds=10, earlyStop=10, saveRounds=1, 
-              optimType='Adam', lr=0.001, weightDecay=0, isHigherBetter=True, metrics="MaF", report=["ACC", "MiF"], 
-              savePath='model'):
+    def train(self, dataClass, trainSize=256, batchSize=256, epoch=100, stopRounds=10, earlyStop=10, saveRounds=1,
+              optimType='Adam', lr=0.001, weightDecay=0, isHigherBetter=True, metrics="MaF", report=["ACC", "MiF"],
+              savePath='model', vectorFunc='word2vec'):
         dataClass.describe()
         assert batchSize%trainSize==0
         metrictor = Metrictor(dataClass.classNum)
         self.stepCounter = 0
         self.stepUpdate = batchSize//trainSize
         optimizer = torch.optim.Adam(self.moduleList.parameters(), lr=lr, weight_decay=weightDecay)
-        trainStream = dataClass.random_batch_data_stream(batchSize=trainSize, type='train', device=self.device)
+        if vectorFunc=='word2vec':
+            trainStream = dataClass.random_batch_data_stream(batchSize=trainSize, type='train', device=self.device)
+        elif vectorFunc=='doc2vec':
+            trainStream = dataClass.random_para_data_stream(batchSize=trainSize, type='train', device=self.device)
         itersPerEpoch = (dataClass.trainSampleNum+trainSize-1)//trainSize
         mtc,bestMtc,stopSteps = 0.0,0.0,0
-        if dataClass.validSampleNum>0: validStream = dataClass.random_batch_data_stream(batchSize=trainSize, type='valid', device=self.device)
+        if dataClass.validSampleNum>0:
+            if vectorFunc == 'word2vec':
+                validStream = dataClass.random_batch_data_stream(batchSize=trainSize, type='valid', device=self.device)
+            elif vectorFunc=='doc2vec':
+                validStream = dataClass.random_para_data_stream(batchSize=trainSize, type='valid', device=self.device)
         st = time.time()
         for e in range(epoch):
             for i in range(itersPerEpoch):
                 self.to_train_mode()
-                X,Y = next(trainStream)
+                #X,Y = next(trainStream)
+                try:
+                    X, Y = next(trainStream)
+                except StopIteration:
+                    break
                 loss = self._train_step(X,Y, optimizer)
                 if stopRounds>0 and (e*itersPerEpoch+i+1)%stopRounds==0:
                     self.to_eval_mode()
                     print(f"After iters {e*itersPerEpoch+i+1}: [train] loss= {loss:.3f};", end='')
                     if dataClass.validSampleNum>0:
-                        X,Y = next(validStream)
+                        #X,Y = next(validStream)
+                        try:
+                            X, Y = next(validStream)
+                        except StopIteration:
+                            break
                         loss = self.calculate_loss(X,Y)
                         print(f' [valid] loss= {loss:.3f};', end='')
                     restNum = ((itersPerEpoch-i-1)+(epoch-e-1)*itersPerEpoch)*trainSize
@@ -165,16 +181,17 @@ class BaseClassifier:
             self.stepCounter = 0
             p = True
         loss = self.calculate_loss(X, Y)/self.stepUpdate
-        loss.backward()
+        loss.backward(retain_graph=True)
         if p:
             optimizer.step()
             optimizer.zero_grad()
+
         return loss*self.stepUpdate
 
 class TextClassifier_SPPCNN(BaseClassifier):
-    def __init__(self, classNum, embedding, SPPSize=128, feaSize=512, filterNum=448, contextSizeList=[1,3,5], hiddenList=[], 
-                 embDropout=0.3, fcDropout=0.5, 
-                 useFocalLoss=False, weight=None, device=torch.device("cuda:0")):
+    def __init__(self, classNum, embedding, SPPSize=128, feaSize=512, filterNum=448, contextSizeList=[1,3,5], hiddenList=[],
+                 embDropout=0.3, fcDropout=0.5,
+                 useFocalLoss=False, weight=None, device=torch.device("cuda:0"), docFeaSize=1, vectorFunc='word2vec'):
         self.textEmbedding = TextEmbedding( torch.tensor(embedding, dtype=torch.float),dropout=embDropout ).to(device)
         self.textSPP = TextSPP(SPPSize).to(device)
         self.textCNN = TextCNN(feaSize, contextSizeList, filterNum).to(device)
@@ -184,10 +201,12 @@ class TextClassifier_SPPCNN(BaseClassifier):
         self.device = device
         self.feaSize = feaSize
         self.criterion = nn.CrossEntropyLoss() if not useFocalLoss else FocalCrossEntropyLoss(weight=weight)
+        self.vectorFunc=vectorFunc
     def calculate_y_logit(self, X):
         X,_ = X['seqArr'],X['seqLenArr']
         # X: batchSize × seqLen
         X = self.textEmbedding(X) # => batchSize × seqLen × feaSize
+        #if self.vectorFunc == 'word2vec':
         X = X.transpose(1,2)
         X = self.textSPP(X) # => batchSize × feaSize × sppSize
         X = self.textCNN(X) # => batchSize × scaleNum*filterNum
